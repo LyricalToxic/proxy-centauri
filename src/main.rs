@@ -1,12 +1,14 @@
-use std::io;
+mod cmd;
+mod http;
 
+use clap::Parser;
+use std::io;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::spawn;
 
-use crate::http_parser::HTTPResponseParser;
-
-mod http_parser;
+use cmd::cli::Cli;
+use http::http_parser::{HTTPParser, HTTPRequestParser};
 
 static TEST: bool = false;
 
@@ -29,32 +31,49 @@ async fn process_tcp_client_stream(mut socket: TcpStream) -> io::Result<()> {
                 return Err(e.into());
             }
         }
-        let http_parser = HTTPResponseParser::new(Box::from(buf)).unwrap();
-        println!("Read data: {}", http_parser.get_text());
-        println!("Headers: {}", http_parser.get_headers());
+        let http_parser = HTTPRequestParser::new(&buf);
+        let http_request = http_parser.parse();
+        println!("Request: {}", http_request);
         break;
     }
+    loop {
+        socket.writable().await?;
+        match socket.try_write("HTTP/1.1 200 OK\n\n<h1>Hello traveller</h1>".as_bytes()) {
+            Ok(n) => {
+                println!("HERE");
+                break;
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                continue;
+            }
+            Err(e) => {
+                return Err(e.into());
+            }
+        }
+    }
 
-    socket.shutdown().await?;
     println!("Socket shutdown {:?}", socket.peer_addr());
     Ok(())
 }
 
 async fn send_hello() -> io::Result<()> {
     println!("Prepare to send hello");
-    let mut sender = TcpStream::connect("127.0.0.1:8081").await?;
-    let message = String::from("
-GET / HTTP/1.1
-Content-Type: application/json
-User-Agent: PostmanRuntime/7.39.0
-Accept: */*
-Host: 127.0.0.1:8081
-Accept-Encoding: gzip, deflate, br
-Connection: keep-alive
-Content-Length: 3
+    let mut sender = TcpStream::connect("127.0.0.1:7272").await?;
+    let message = String::from(
+        "
+        GET / HTTP/1.1
+        Content-Type: application/json
+        User-Agent: PostmanRuntime/7.39.0
+        Accept: */*
+        Host: 127.0.0.1:8081
+        Accept-Encoding: gzip, deflate, br
+        Connection: keep-alive
+        Content-Length: 3
 
-END
-");
+        END
+        "
+        .trim(),
+    );
     let message_bytes = message.as_bytes();
     sender.write(message_bytes).await?;
     println!("Hello was sent");
@@ -62,14 +81,12 @@ END
     Ok(())
 }
 
-async fn handle_connection() -> io::Result<()> {
-    let tcp_listener: TcpListener = TcpListener::bind("127.0.0.1:8081").await?;
+async fn handle_connection(port: u32) -> io::Result<()> {
+    let tcp_listener: TcpListener = TcpListener::bind(format!("127.0.0.1:{port}")).await?;
     loop {
         let (client_stream, addr) = tcp_listener.accept().await?;
         println!("Address: {}", addr);
-        spawn(async move {
-            process_tcp_client_stream(client_stream).await
-        });
+        spawn(async move { process_tcp_client_stream(client_stream).await });
         if TEST {
             break;
         }
@@ -77,13 +94,11 @@ async fn handle_connection() -> io::Result<()> {
     Ok(())
 }
 
-
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    spawn(async move {
-        send_hello().await
-    });
-    handle_connection().await
+    let cli = Cli::parse();
+    // spawn(async move { send_hello().await });
+    handle_connection(cli.port).await
 }
 
 #[cfg(test)]
@@ -92,30 +107,30 @@ mod tests {
 
     #[tokio::test]
     async fn test_say_hello() {
-        spawn(async move {
-            send_hello().await
-        });
-        handle_connection().await;
+        spawn(async move { send_hello().await });
+        handle_connection(7272).await.expect("PANIC");
 
         assert!(true)
     }
 
     #[test]
     fn test_split() {
-        let http_request_raw = String::from("
-GET / HTTP/1.1
-Content-Type: application/json
-User-Agent: PostmanRuntime/7.39.0
-Accept: */*
-Host: 127.0.0.1:8081
-Accept-Encoding: gzip, deflate, br
-Connection: keep-alive
-Content-Length: 3
+        let http_request_raw = String::from(
+            "
+            GET / HTTP/1.1
+            Content-Type: application/json
+            User-Agent: PostmanRuntime/7.39.0
+            Accept: */*
+            Host: 127.0.0.1:8081
+            Accept-Encoding: gzip, deflate, br
+            Connection: keep-alive
+            Content-Length: 3
 
-END
-");
+            END
+        ",
+        );
         let split_lines = http_request_raw.lines().collect::<Vec<&str>>();
-        let slice =&split_lines[2..];
+        let slice = &split_lines[2..];
         println!("{:?}", slice);
 
         assert!(true)
